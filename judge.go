@@ -1,5 +1,10 @@
 package judge
 
+import (
+	"context"
+	"encoding/json"
+)
+
 type ToolCall struct {
 	Name   string
 	Input  json.RawMessage
@@ -27,5 +32,14 @@ func New(fn LLMFunc) *Judge {
 }
 
 func (j *Judge) Evaluate(ctx context.Context, input Input) (Result, error) {
+	panic("niy")
+}
+
+type MergedIntent struct {
+	Content      string
+	TopicChanged bool
+}
+
+func (j *Judge) MergeIntent(ctx context.Context, prevIntent, newMessage string) (MergedIntent, error) {
 	panic("niy")
 }

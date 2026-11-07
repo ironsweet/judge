@@ -1,5 +1,10 @@
 package judge
 
+import (
+	"context"
+	"time"
+)
+
 type SessionState struct {
 	SessionID   string     `json:"session_id"`
 	IntentParts []string   `json:"intent_parts"`
