@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 )
 
@@ -30,6 +31,7 @@ type Judge struct {
 
 	evaluationPrompt  string
 	mergeIntentPrompt string
+	maxPromptChars    int
 
 	logger *slog.Logger
 }
@@ -41,6 +43,7 @@ func New(fn LLMFunc, opts ...Option) *Judge {
 		fn:                fn,
 		evaluationPrompt:  defaultEvaluatePrompt,
 		mergeIntentPrompt: defaultMergeIntentPrompt,
+		maxPromptChars:    defaultMaxPromptChars,
 		logger:            slog.Default(),
 	}
 	for _, opt := range opts {
@@ -66,6 +69,11 @@ func WithLogger(logger *slog.Logger) Option {
 		j.logger = logger
 	}
 }
+func WithMaxPromptChars(n int) Option {
+	return func(j *Judge) {
+		j.maxPromptChars = n
+	}
+}
 
 const defaultEvaluatePrompt = `Analyze if the AI agent properly fulfilled what the user asked for.
 
@@ -84,21 +92,22 @@ Instructions:
 3. Are there verification steps the user requested but AI agent skipped?
 
 Output Rules:
-If the AI agent fully fulfilled the intent, respond with ONLY "OK"
+If the AI agent fully fulfilled the intent, respond with ONLY "OK".
 If there are gaps or issues, output correction message in this format:
-"<Your observation about what's missing>. <Question or reminder to AI agent>"
+"ISSUE: <Your observation>. <Question or reminder>"
+Do not use any other format.
 
 Examples:
 1. Missing verification
    User: "Build the feature and ensure it compiles successfully"
    Assistant: "Feature implemented. Task complete."
    Actions: [filesystem: write main.go]
-   Output: "You claimed the task is done, but I don't see evidence you verified compilation. Did you run 'go build' or equivalent?"
+   Output: "ISSUE: You claimed the task is done, but I don't see evidence you verified compilation. Did you run 'go build' or equivalent?"
 2. Missing git check
 	 User: "Make the changes and check git status"
    Assistant: "Changes made successfully."
    Actions: [filesystem: write config.json]
-   Output: "The user asked you to check git status, but I don't see that in your actions. Can you run 'git status' as requested?"
+   Output: "ISSUE: The user asked you to check git status, but I don't see that in your actions. Can you run 'git status' as requested?"
 3. Everything done
    User: "Build and test the feature"
    Assistant: "Built successfully, all tests pass."
@@ -125,34 +134,114 @@ Latest user message:
 %s
 `
 
+const defaultMaxPromptChars = 8000
+
 func (j *Judge) Evaluate(ctx context.Context, input Input) (Result, error) {
 	var fallbackResult = Result{Satisfied: true}
 	if j.fn == nil {
 		return fallbackResult, nil
 	}
 
-	p := fmt.Sprintf(j.evaluationPrompt, input.UserIntent, input.AgentResponse, formatToolCalls(input.ToolCalls))
+	fixed := len(fmt.Sprintf(j.evaluationPrompt, "", "", ""))
+	nonOptional := fixed + len(input.UserIntent) + len(input.AgentResponse)
+	budget := j.maxPromptChars - nonOptional
+	if budget <= 0 {
+		j.logger.Warn("LLM evaluation prompt exceeds maxPromptChars, skipping evaluation", "maxPromptChars", j.maxPromptChars, "fixed", fixed, "nonOptional", nonOptional)
+		return fallbackResult, nil
+	}
+
+	toolCallsStr := formatToolCalls(input.ToolCalls, budget)
+	p := fmt.Sprintf(j.evaluationPrompt, input.UserIntent, input.AgentResponse, toolCallsStr)
 	output, err := j.fn(ctx, p)
 	if err != nil {
 		j.logger.Warn("LLM evaluation failed, continuing with fail-open", "error", err)
 		return fallbackResult, nil // fail-open
 	}
-	if output == "OK" {
-		return fallbackResult, nil
-	}
-	return Result{Satisfied: false, Reason: output}, nil
+	return j.parseEvaluation(output), nil
 }
 
-func formatToolCalls(calls []ToolCall) string {
-	var formatted []string
+// formatToolCalls formats the tool calls into a string with length budget
+// Omit field sorted by length, until the total length is within budget.
+// Algorithm:
+// 1. Scan all input and record the length of each field
+// 2. Use backpacking to find the threshold, so excluding the longest fields will fit within budget
+// 3. Iterate the tool calls and format them, skipping the longest fields until the total length is within budget
+func formatToolCalls(calls []ToolCall, budget int) string {
+	var diffs []int
+	var totalLen int
 	for _, call := range calls {
-		formatted = append(formatted, fmt.Sprintf("- %s", formatToolCall(call)))
+		totalLen += len(fmt.Sprintf("- %s", call.Name))
+		var input map[string]any
+		err := json.Unmarshal(call.Input, &input)
+		if err != nil {
+			totalLen += len(call.Input)
+			continue
+		}
+		for k, v := range input {
+			totalLen += len(fmt.Sprintf(" %s=\"%v\"", k, v))
+			n := len(fmt.Sprintf("%v", v))
+			diff := n - len(fmt.Sprintf("<%d bytes omitted>", n))
+			if diff > 0 {
+				diffs = append(diffs, diff)
+			}
+		}
+		totalLen++ // for newline
 	}
-	return strings.Join(formatted, "\n")
+
+	var threshold int
+	if totalLen > budget {
+		slices.Sort(diffs)
+		for i := len(diffs) - 1; i >= 0; i-- {
+			if totalLen-diffs[i] <= budget {
+				threshold = diffs[i]
+				break
+			}
+			totalLen -= diffs[i]
+		}
+	}
+
+	var sb strings.Builder
+	for _, call := range calls {
+		sb.WriteString(fmt.Sprintf("- %s", call.Name))
+		var input map[string]any
+		err := json.Unmarshal(call.Input, &input)
+		if err != nil {
+			sb.WriteString(fmt.Sprintf(" %s", call.Input))
+			sb.WriteString("\n")
+			continue
+		}
+		for k, v := range input {
+			n := len(fmt.Sprintf("%v", v))
+			if threshold > 0 && n > threshold {
+				sb.WriteString(fmt.Sprintf(" %s=\"<%d bytes omitted>\"", k, n))
+			} else {
+				sb.WriteString(fmt.Sprintf(" %s=\"%v\"", k, v))
+			}
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
 }
 
-func formatToolCall(call ToolCall) string {
-	return fmt.Sprintf("%s %s", call.Name, call.Input)
+func (j *Judge) parseEvaluation(output string) Result {
+	trimmed := strings.TrimSpace(output)
+	upper := strings.ToUpper(trimmed)
+
+	if strings.HasPrefix(upper, "ISSUE:") {
+		reason := strings.TrimSpace(trimmed[len("ISSUE:"):])
+		return Result{Satisfied: false, Reason: reason}
+	}
+
+	if upper == "OK" ||
+		strings.HasPrefix(upper, "OK ") ||
+		strings.HasPrefix(upper, "OK.") ||
+		strings.HasPrefix(upper, "OK,") ||
+		strings.HasPrefix(upper, "OK\n") {
+		return Result{Satisfied: true}
+	}
+
+	j.logger.Warn("LLM evaluation returned unexpected output, treating as satisfied", "output", trimmed)
+	return Result{Satisfied: true}
 }
 
 type MergedIntent struct {
