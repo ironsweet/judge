@@ -180,9 +180,15 @@ func TestFormatToolCalls_Budget(t *testing.T) {
 	}
 	out := formatToolCalls(calls, 20000)
 	assert.NotContains(t, out, "omitted")
+
 	out = formatToolCalls(calls, 6000)
 	assert.Contains(t, out, "omitted")
 	assert.Contains(t, out, "/tmp/file.txt")
+
 	out = formatToolCalls(calls, 200)
 	assert.Equal(t, 2, strings.Count(out, "omitted"))
+
+	out = formatToolCalls(calls, 50)
+	assert.Equal(t, 3, strings.Count(out, "omitted"))
+	assert.NotContains(t, out, "/tmp/file.txt")
 }

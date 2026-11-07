@@ -164,7 +164,7 @@ func (j *Judge) Evaluate(ctx context.Context, input Input) (Result, error) {
 // Omit field sorted by length, until the total length is within budget.
 // Algorithm:
 // 1. Scan all input and record the length of each field
-// 2. Use backpacking to find the threshold, so excluding the longest fields will fit within budget
+// 2. Sort diffs descending and greedily omit the largest fields until totalLen fits within budget
 // 3. Iterate the tool calls and format them, skipping the longest fields until the total length is within budget
 func formatToolCalls(calls []ToolCall, budget int) string {
 	var diffs []int
@@ -174,7 +174,9 @@ func formatToolCalls(calls []ToolCall, budget int) string {
 		var input map[string]any
 		err := json.Unmarshal(call.Input, &input)
 		if err != nil {
+			totalLen++ // space after name
 			totalLen += len(call.Input)
+			totalLen++ // newline
 			continue
 		}
 		for k, v := range input {
@@ -188,7 +190,7 @@ func formatToolCalls(calls []ToolCall, budget int) string {
 		totalLen++ // for newline
 	}
 
-	var threshold int
+	var threshold = -1
 	if totalLen > budget {
 		slices.Sort(diffs)
 		for i := len(diffs) - 1; i >= 0; i-- {
@@ -197,6 +199,9 @@ func formatToolCalls(calls []ToolCall, budget int) string {
 				break
 			}
 			totalLen -= diffs[i]
+		}
+		if threshold == -1 {
+			threshold = 0 // omit all
 		}
 	}
 
@@ -212,7 +217,7 @@ func formatToolCalls(calls []ToolCall, budget int) string {
 		}
 		for k, v := range input {
 			n := len(fmt.Sprintf("%v", v))
-			if threshold > 0 && n > threshold {
+			if threshold >= 0 && n > threshold {
 				sb.WriteString(fmt.Sprintf(" %s=\"<%d bytes omitted>\"", k, n))
 			} else {
 				sb.WriteString(fmt.Sprintf(" %s=\"%v\"", k, v))
@@ -236,7 +241,7 @@ func (j *Judge) parseEvaluation(output string) Result {
 		strings.HasPrefix(upper, "OK ") ||
 		strings.HasPrefix(upper, "OK.") ||
 		strings.HasPrefix(upper, "OK,") ||
-		strings.HasPrefix(upper, "OK\n") {
+		strings.HasPrefix(upper, "OK!") {
 		return Result{Satisfied: true}
 	}
 
