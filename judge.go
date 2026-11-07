@@ -3,6 +3,9 @@ package judge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
+	"strings"
 )
 
 type ToolCall struct {
@@ -12,8 +15,9 @@ type ToolCall struct {
 }
 
 type Input struct {
-	UserMessage string
-	ToolCalls   []ToolCall
+	UserIntent    string
+	AgentResponse string
+	ToolCalls     []ToolCall
 }
 
 type Result struct {
@@ -23,23 +27,154 @@ type Result struct {
 
 type Judge struct {
 	fn LLMFunc
+
+	evaluationPrompt  string
+	mergeIntentPrompt string
+
+	logger *slog.Logger
 }
 
 type LLMFunc func(ctx context.Context, prompt string) (string, error)
 
-func New(fn LLMFunc) *Judge {
-	return &Judge{fn: fn}
+func New(fn LLMFunc, opts ...Option) *Judge {
+	j := &Judge{
+		fn:                fn,
+		evaluationPrompt:  defaultEvaluatePrompt,
+		mergeIntentPrompt: defaultMergeIntentPrompt,
+		logger:            slog.Default(),
+	}
+	for _, opt := range opts {
+		opt(j)
+	}
+	return j
 }
 
+type Option func(*Judge)
+
+func WithEvaluationPrompt(tmpl string) Option {
+	return func(j *Judge) {
+		j.evaluationPrompt = tmpl
+	}
+}
+func WithMergeIntentPrompt(tmpl string) Option {
+	return func(j *Judge) {
+		j.mergeIntentPrompt = tmpl
+	}
+}
+func WithLogger(logger *slog.Logger) Option {
+	return func(j *Judge) {
+		j.logger = logger
+	}
+}
+
+const defaultEvaluatePrompt = `Analyze if the AI agent properly fulfilled what the user asked for.
+
+Captured User Intent:
+%s
+
+Agent Response:
+%s
+
+Agent Actions:
+%s
+
+Instructions:
+1. What did the user explicitly ask AI agent to do or verify?
+2. Did AI agent actually perform those actions, or just claim completion?
+3. Are there verification steps the user requested but AI agent skipped?
+
+Output Rules:
+If the AI agent fully fulfilled the intent, respond with ONLY "OK"
+If there are gaps or issues, output correction message in this format:
+"<Your observation about what's missing>. <Question or reminder to AI agent>"
+
+Examples:
+1. Missing verification
+   User: "Build the feature and ensure it compiles successfully"
+   Assistant: "Feature implemented. Task complete."
+   Actions: [filesystem: write main.go]
+   Output: "You claimed the task is done, but I don't see evidence you verified compilation. Did you run 'go build' or equivalent?"
+2. Missing git check
+	 User: "Make the changes and check git status"
+   Assistant: "Changes made successfully."
+   Actions: [filesystem: write config.json]
+   Output: "The user asked you to check git status, but I don't see that in your actions. Can you run 'git status' as requested?"
+3. Everything done
+   User: "Build and test the feature"
+   Assistant: "Built successfully, all tests pass."
+   Actions: [shell: go build, shell: go test]
+	 Output: "OK"
+`
+
+const defaultMergeIntentPrompt = `Summarize the user's intent in 1-2 short sentences. Focus on:
+1. What the user wants done
+2. Any specific verification or artifact expected
+
+Be concise. Do not explain your reasoning. Output ONLY the summary.
+
+For example:
+- "Build feature X and verify it compiles"
+- "Fix the null pointer bug in handler.go"
+- "Review the code for security issues"
+- "Explain how the auth module works"
+
+Previous intent:
+%s
+
+Latest user message:
+%s
+`
+
 func (j *Judge) Evaluate(ctx context.Context, input Input) (Result, error) {
-	panic("niy")
+	var fallbackResult = Result{Satisfied: true}
+	if j.fn == nil {
+		return fallbackResult, nil
+	}
+
+	p := fmt.Sprintf(j.evaluationPrompt, input.UserIntent, input.AgentResponse, formatToolCalls(input.ToolCalls))
+	output, err := j.fn(ctx, p)
+	if err != nil {
+		j.logger.Warn("LLM evaluation failed, continuing with fail-open", "error", err)
+		return fallbackResult, nil // fail-open
+	}
+	if output == "OK" {
+		return fallbackResult, nil
+	}
+	return Result{Satisfied: false, Reason: output}, nil
+}
+
+func formatToolCalls(calls []ToolCall) string {
+	var formatted []string
+	for _, call := range calls {
+		formatted = append(formatted, fmt.Sprintf("- %s", formatToolCall(call)))
+	}
+	return strings.Join(formatted, "\n")
+}
+
+func formatToolCall(call ToolCall) string {
+	return fmt.Sprintf("%s %s", call.Name, call.Input)
 }
 
 type MergedIntent struct {
-	Content      string
-	TopicChanged bool
+	Content string
 }
 
 func (j *Judge) MergeIntent(ctx context.Context, prevIntent, newMessage string) (MergedIntent, error) {
-	panic("niy")
+	fallbackStr := fmt.Sprintf("%s\n%s", prevIntent, newMessage)
+	if j.fn == nil {
+		return MergedIntent{Content: fallbackStr}, nil
+	}
+
+	p := fmt.Sprintf(j.mergeIntentPrompt, prevIntent, newMessage)
+	output, err := j.fn(ctx, p)
+	if err != nil {
+		j.logger.Warn("LLM merge intent failed, continuing with fail-open", "error", err)
+		return MergedIntent{Content: fallbackStr}, nil // fail-open
+	}
+	if strings.TrimSpace(output) == "" {
+		j.logger.Warn("LLM merge intent returned empty, continuing with fail-open")
+		return MergedIntent{Content: fallbackStr}, nil // fail-open
+	}
+
+	return MergedIntent{Content: output}, nil
 }
