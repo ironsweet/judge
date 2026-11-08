@@ -21,12 +21,12 @@ type mergeCall struct {
 	newMessage string
 }
 
-func (j *fakeJudge) MergeIntent(ctx context.Context, prevIntent, newMessage string) (MergedIntent, error) {
+func (j *fakeJudge) MergeIntent(_ context.Context, prevIntent, newMessage string) (MergedIntent, error) {
 	j.mergeCalls = append(j.mergeCalls, mergeCall{prevIntent: prevIntent, newMessage: newMessage})
 	return j.intent, nil
 }
 
-func (j *fakeJudge) Evaluate(ctx context.Context, input Input) (Result, error) {
+func (j *fakeJudge) Evaluate(_ context.Context, input Input) (Result, error) {
 	j.evalCalls = append(j.evalCalls, input)
 	return j.evaluation, nil
 }
@@ -34,11 +34,15 @@ func (j *fakeJudge) Evaluate(ctx context.Context, input Input) (Result, error) {
 type fakePersister struct {
 	savedState  *SessionState
 	loadedState *SessionState
+	loadErr     error
 	loadCalls   []string
 }
 
 func (p *fakePersister) Load(sessionID string) (*SessionState, error) {
 	p.loadCalls = append(p.loadCalls, sessionID)
+	if p.loadErr != nil {
+		return nil, p.loadErr
+	}
 	if p.loadedState != nil {
 		return p.loadedState, nil
 	}
@@ -62,6 +66,7 @@ func TestSession_OnUserInput(t *testing.T) {
 	assert.Equal(t, "do X", s.state.Intent)
 	assert.Equal(t, "do X", fp.savedState.Intent)
 	assert.False(t, fp.savedState.LastUpdated.IsZero())
+	assert.Len(t, fp.loadCalls, 0, "NewSession should not call Load")
 }
 
 func TestSession_OnUserInput2(t *testing.T) {
@@ -76,6 +81,7 @@ func TestSession_OnUserInput2(t *testing.T) {
 	assert.Equal(t, "do X and Y", s.state.Intent)
 	assert.Equal(t, "do X and Y", fp.savedState.Intent)
 	assert.False(t, fp.savedState.LastUpdated.IsZero())
+	assert.Len(t, fp.loadCalls, 0, "NewSession should not call Load")
 }
 
 func TestSession_OnUserInput_SkipSystemTag(t *testing.T) {
@@ -123,29 +129,39 @@ func TestSession_OnTurnEnd_WithoutToolCall(t *testing.T) {
 func TestSession_OnTurnEnd_WithToolCall(t *testing.T) {
 	ctx := t.Context()
 	fj := &fakeJudge{evaluation: Result{Satisfied: false, Reason: "issue found"}}
-	persister := &fakePersister{}
+	fp := &fakePersister{}
 	s := NewSession(&SessionState{
 		Intent: "do X",
 		ToolCalls: []ToolCall{
 			{Name: "toolA", Input: []byte(`{"param":1}`)},
 			{Name: "toolB", Input: []byte(`{"param":2}`)},
 		},
-	}, fj, persister)
+	}, fj, fp)
 	result, err := s.OnTurnEnd(ctx, "agent response")
 	assert.NoError(t, err)
 	assert.Equal(t, Result{Satisfied: false, Reason: "issue found"}, result)
-	assert.NotNil(t, persister.savedState)
-	assert.Nil(t, persister.savedState.ToolCalls) // ToolCalls should be cleared after turn end)
-	assert.NotEmpty(t, persister.savedState.Intent)
+	assert.NotNil(t, fp.savedState)
+	assert.Nil(t, fp.savedState.ToolCalls) // ToolCalls should be cleared after turn end
+	assert.NotEmpty(t, fp.savedState.Intent)
+	assert.Len(t, fp.loadCalls, 0, "NewSession should not call Load")
 	assert.Equal(t, 1, len(fj.evalCalls))
 	assert.Equal(t, "do X", fj.evalCalls[0].UserIntent)
 	assert.Equal(t, "agent response", fj.evalCalls[0].AgentResponse)
 	assert.Len(t, fj.evalCalls[0].ToolCalls, 2)
 }
 
-func TestSession_LoadsFromPersister(t *testing.T) {
+func TestSession_LoadSession(t *testing.T) {
 	fp := &fakePersister{loadedState: &SessionState{SessionID: "s1", Intent: "previous intent"}}
-	s := NewSession(&SessionState{SessionID: "s1"}, &fakeJudge{}, fp)
+	s := LoadSession("s1", &fakeJudge{}, fp)
 	assert.Equal(t, "previous intent", s.state.Intent)
 	assert.Equal(t, []string{"s1"}, fp.loadCalls)
+	assert.Equal(t, "s1", s.state.SessionID)
+}
+
+func TestSession_LoadSession_Fails(t *testing.T) {
+	fp := &fakePersister{loadErr: assert.AnError}
+	s := LoadSession("s1", &fakeJudge{}, fp)
+	assert.Empty(t, s.state.Intent)
+	assert.Equal(t, []string{"s1"}, fp.loadCalls)
+	assert.Equal(t, "s1", s.state.SessionID)
 }
