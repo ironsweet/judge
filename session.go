@@ -27,6 +27,11 @@ type Interface interface {
 	Evaluate(ctx context.Context, input Input) (Result, error)
 }
 
+type Persister interface {
+	Load(sessionID string) (*SessionState, error)
+	Save(state *SessionState) error
+}
+
 func NewSession(state *SessionState, judge Interface, persister Persister, opts ...SessionOption) *Session {
 	if state == nil || judge == nil || persister == nil {
 		panic("judge: state, judge, and persister must not be nil")
