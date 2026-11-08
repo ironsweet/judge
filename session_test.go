@@ -33,6 +33,7 @@ func (j *fakeJudge) Evaluate(_ context.Context, input Input) (Result, error) {
 
 type fakePersister struct {
 	savedState  *SessionState
+	saveErr     error
 	loadedState *SessionState
 	loadErr     error
 	loadCalls   []string
@@ -50,6 +51,9 @@ func (p *fakePersister) Load(sessionID string) (*SessionState, error) {
 }
 
 func (p *fakePersister) Save(state *SessionState) error {
+	if p.saveErr != nil {
+		return p.saveErr
+	}
 	b, _ := json.Marshal(state)
 	var snapshot SessionState
 	_ = json.Unmarshal(b, &snapshot)
@@ -97,6 +101,14 @@ func TestSession_OnUserInput_SkipSystemTag(t *testing.T) {
 	assert.Len(t, fj.mergeCalls, 1)
 	assert.Equal(t, "do X", s.state.Intent)
 	assert.Equal(t, "do X", fj.mergeCalls[0].newMessage, "system tag should be stripped")
+}
+
+func TestSession_OnUserInput_SaveFails(t *testing.T) {
+	fp := &fakePersister{saveErr: assert.AnError}
+	s := NewSession(&SessionState{}, &fakeJudge{intent: MergedIntent{Content: "do X"}}, fp)
+	ctx := t.Context()
+	assert.NoError(t, s.OnUserInput(ctx, "do X"))
+	assert.Equal(t, "do X", s.state.Intent)
 }
 
 func TestSession_OnToolCall(t *testing.T) {
@@ -152,7 +164,8 @@ func TestSession_OnTurnEnd_WithToolCall(t *testing.T) {
 
 func TestSession_LoadSession(t *testing.T) {
 	fp := &fakePersister{loadedState: &SessionState{SessionID: "s1", Intent: "previous intent"}}
-	s := LoadSession("s1", &fakeJudge{}, fp)
+	s, err := LoadSession("s1", &fakeJudge{}, fp)
+	assert.NoError(t, err)
 	assert.Equal(t, "previous intent", s.state.Intent)
 	assert.Equal(t, []string{"s1"}, fp.loadCalls)
 	assert.Equal(t, "s1", s.state.SessionID)
@@ -160,8 +173,7 @@ func TestSession_LoadSession(t *testing.T) {
 
 func TestSession_LoadSession_Fails(t *testing.T) {
 	fp := &fakePersister{loadErr: assert.AnError}
-	s := LoadSession("s1", &fakeJudge{}, fp)
-	assert.Empty(t, s.state.Intent)
-	assert.Equal(t, []string{"s1"}, fp.loadCalls)
-	assert.Equal(t, "s1", s.state.SessionID)
+	s, err := LoadSession("s1", &fakeJudge{}, fp)
+	assert.Error(t, err)
+	assert.Nil(t, s)
 }
