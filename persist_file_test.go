@@ -34,11 +34,11 @@ func TestPersist_SaveAndLoad(t *testing.T) {
 	assert.Equal(t, "s1", s.SessionID)
 	assert.Equal(t, "do X", s.Intent)
 	assert.Equal(t, "toolA", s.ToolCalls[0].Name)
-	assert.Equal(t, `{"param": 1}`, string(s.ToolCalls[0].Input))
-	assert.Equal(t, `{"result": "ok"}`, string(s.ToolCalls[0].Output))
+	assert.JSONEq(t, `{"param": 1}`, string(s.ToolCalls[0].Input))
+	assert.JSONEq(t, `{"result": "ok"}`, string(s.ToolCalls[0].Output))
 	assert.Equal(t, "toolB", s.ToolCalls[1].Name)
-	assert.Equal(t, `{"param": 2}`, string(s.ToolCalls[1].Input))
-	assert.Equal(t, `{"result": "ok"}`, string(s.ToolCalls[1].Output))
+	assert.JSONEq(t, `{"param": 2}`, string(s.ToolCalls[1].Input))
+	assert.JSONEq(t, `{"result": "ok"}`, string(s.ToolCalls[1].Output))
 	assert.WithinDuration(t, savedTime, s.LastUpdated, time.Second)
 }
 
