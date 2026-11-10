@@ -22,8 +22,9 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	socket := getenv("JUDGE_SOCKET", "/tmp/judge.sock")
+	socket := getenv("JUDGE_SOCKET", filepath.Join(os.TempDir(), "judge.sock"))
 	workspace := getenv("JUDGE_WORKSPACE", filepath.Join(os.Getenv("HOME"), ".judge"))
+	logger.Info("starting judge daemon", "socket", socket, "workspace", workspace)
 
 	p := judge.NewFilePersister(workspace)
 	llmFn, err := buildLLMFn()
