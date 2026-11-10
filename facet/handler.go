@@ -70,6 +70,7 @@ func (h *Handler) OnEvent(ctx context.Context, ev hookfacet.Event, st *hookfacet
 	case hookfacet.KindUserInput:
 		err := s.OnUserInput(ctx, ev.Payload.Prompt)
 		return hookfacet.Allow(), err
+
 	case hookfacet.KindToolResult:
 		err := s.OnToolCall(ctx, judge.ToolCall{
 			Name:   ev.Payload.ToolName,
@@ -77,15 +78,28 @@ func (h *Handler) OnEvent(ctx context.Context, ev hookfacet.Event, st *hookfacet
 			Output: ev.Payload.ToolResponse,
 		})
 		return hookfacet.Allow(), err
+
 	case hookfacet.KindTurnEnd:
 		res, err := s.OnTurnEnd(ctx, ev.Payload.LastAssistantMessage)
 		if err != nil || res.Satisfied {
+			h.logger.Debug("judge allowed turn", "sessionID", ev.SessionID)
 			return hookfacet.Allow(), err
 		}
+		h.logger.Info("judge blocked turn",
+			"sessionID", ev.SessionID,
+			"reason", truncate(res.Reason, 200))
 		return hookfacet.Block(res.Reason), nil
+
 	default:
 		return hookfacet.Allow(), nil
 	}
 }
 
 var _ hookfacet.Handler = (*Handler)(nil)
+
+func truncate(s string, size int) string {
+	if len(s) > size {
+		return s[:size] + "..."
+	}
+	return s
+}

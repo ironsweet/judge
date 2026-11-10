@@ -157,7 +157,13 @@ func (j *Judge) Evaluate(ctx context.Context, input Input) (Result, error) {
 		j.logger.Warn("LLM evaluation failed, continuing with fail-open", "error", err)
 		return fallbackResult, nil // fail-open
 	}
-	return j.parseEvaluation(output), nil
+
+	result := j.parseEvaluation(output)
+	j.logger.Info("evaluate",
+		"satisfied", result.Satisfied,
+		"reason", truncate(result.Reason, 200),
+	)
+	return result, nil
 }
 
 // formatToolCalls formats the tool calls into a string with length budget
@@ -270,5 +276,9 @@ func (j *Judge) MergeIntent(ctx context.Context, prevIntent, newMessage string) 
 		return MergedIntent{Content: fallbackStr}, nil // fail-open
 	}
 
+	j.logger.Info("merge intent",
+		"intent", truncate(output, 200),
+		"prev_len", len(prevIntent),
+		"new_len", len(newMessage))
 	return MergedIntent{Content: output}, nil
 }

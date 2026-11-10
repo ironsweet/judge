@@ -130,6 +130,10 @@ func (s *Session) OnToolCall(_ context.Context, tc ToolCall) error {
 }
 
 func (s *Session) OnTurnEnd(ctx context.Context, agentResponse string) (Result, error) {
+	s.logger.Info("turn end",
+		"toolCallCount", len(s.state.ToolCalls),
+		"skipped", len(s.state.ToolCalls) == 0)
+
 	if len(s.state.ToolCalls) == 0 {
 		s.state.LastUpdated = time.Now()
 		err := s.persister.Save(s.state)

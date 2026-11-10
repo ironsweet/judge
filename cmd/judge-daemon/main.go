@@ -16,11 +16,21 @@ import (
 	"github.com/ironsweet/judge/facet"
 )
 
+var logLevel = new(slog.LevelVar)
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	switch os.Getenv("JUDGE_LOG_LEVEL") {
+	case "debug":
+		logLevel.Set(slog.LevelDebug)
+	case "warn":
+		logLevel.Set(slog.LevelWarn)
+	case "error":
+		logLevel.Set(slog.LevelError)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
 
 	socket := getenv("JUDGE_SOCKET", filepath.Join(os.TempDir(), "judge.sock"))
 	workspace := getenv("JUDGE_WORKSPACE", filepath.Join(os.Getenv("HOME"), ".judge"))
